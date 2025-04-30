@@ -43,7 +43,7 @@ const SignUp: React.FC = () => {
 
     try {
       // First, check if a user with this email already exists
-      const { data: existingUser, error: existingUserError } = await supabase
+      const { data: existingUser, error: _existingUserError } = await supabase
         .from('profiles')
         .select('id')
         .eq('email', formData.email)

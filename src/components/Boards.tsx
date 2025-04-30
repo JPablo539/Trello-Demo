@@ -20,13 +20,13 @@ const Boards: React.FC = () => {
     fetchBoards();
   }, []);
 
-  const fetchBoards = async () => {
-    try {
+    const fetchBoards = async () => {
+      try {
       setLoading(true);
-      const profileId = localStorage.getItem('profileId');
-      if (!profileId) {
+        const profileId = localStorage.getItem('profileId');
+        if (!profileId) {
         throw new Error('No profile ID found');
-      }
+        }
 
       const { data: relations, error: relationsError } = await supabase
         .from('boardProfileRelation')
@@ -46,13 +46,13 @@ const Boards: React.FC = () => {
         if (boardsError) throw boardsError;
         setBoards(boardsData || []);
       }
-    } catch (err) {
+      } catch (err) {
       console.error('Error fetching boards:', err);
-      setError('Failed to load boards');
-    } finally {
-      setLoading(false);
-    }
-  };
+        setError('Failed to load boards');
+      } finally {
+        setLoading(false);
+      }
+    };
 
   const handleCreateBoard = async () => {
     if (!newBoardName.trim()) return;
@@ -207,19 +207,19 @@ const Boards: React.FC = () => {
               }}
               className="w-64 px-3 py-2 bg-white/10 border border-white/20 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-transparent placeholder-white/70 text-white"
             />
-            <button
-              onClick={handleCreateBoard}
+              <button
+                onClick={handleCreateBoard}
               className="px-4 py-2 bg-[#579DFF] text-white rounded-md hover:bg-[#579DFF]/90 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[#579DFF]/50"
-            >
+              >
               Create Board
-            </button>
+              </button>
           </div>
-        </div>
-
+            </div>
+            
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {boards.map((board) => (
-            <div
-              key={board.id}
+                {boards.map((board) => (
+                  <div
+                    key={board.id}
               className="bg-white/10 rounded-lg p-4 hover:bg-white/20 transition-colors duration-200 cursor-pointer group"
               onClick={() => navigate(`/board/${board.id}`)}
             >
@@ -245,7 +245,7 @@ const Boards: React.FC = () => {
               <p className="text-sm text-white/50 mt-2">
                 Created {new Date(board.created_at).toLocaleDateString()}
               </p>
-            </div>
+          </div>
           ))}
         </div>
       </div>
@@ -253,4 +253,4 @@ const Boards: React.FC = () => {
   );
 };
 
-export default Boards;
+export default Boards; 

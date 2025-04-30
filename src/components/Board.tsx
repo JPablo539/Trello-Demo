@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import List from './List';
@@ -29,7 +29,6 @@ const Board: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [newListName, setNewListName] = useState('');
-  const [newCardContent, setNewCardContent] = useState<{ [key: string]: string }>({});
   const [isDragging, setIsDragging] = useState(false);
 
   const fetchListsAndCards = useCallback(async () => {
@@ -196,7 +195,7 @@ const Board: React.FC = () => {
 
   const onDragEnd = async (result: DropResult) => {
     setIsDragging(false);
-    const { destination, source, draggableId, type } = result;
+    const { destination, source, type } = result;
     
     if (!destination) return;
     if (destination.droppableId === source.droppableId && destination.index === source.index) return;

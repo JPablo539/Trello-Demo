@@ -40,7 +40,6 @@ const List: React.FC<ListProps> = ({
   const titleInputRef = useRef<HTMLInputElement>(null);
   const cardInputRef = useRef<HTMLTextAreaElement>(null);
   const editCardInputRef = useRef<HTMLTextAreaElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (isEditingTitle && titleInputRef.current) {
