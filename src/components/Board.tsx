@@ -124,7 +124,7 @@ const Board: React.FC = () => {
     if (!newListName.trim()) return;
     try {
       const newPosition = lists.length > 0 ? Math.max(...lists.map(l => l.position)) + 1 : 1;
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('lists')
         .insert([{ board_id: boardId, list_name: newListName.trim(), position: newPosition }])
         .select()
@@ -169,7 +169,7 @@ const Board: React.FC = () => {
     }
   };
 
-  const handleDeleteCard = async (cardId: string, listId: string) => {
+  const handleDeleteCard = async (cardId: string) => {
     try {
       const { error } = await supabase.from('cards').delete().eq('id', cardId);
       if (error) throw error;
