@@ -21,6 +21,7 @@ const SignUp: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState<boolean>(false);
+  // Removed retryAfter state as it's unused
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -34,6 +35,7 @@ const SignUp: React.FC = () => {
     e.preventDefault();
     setError('');
     setLoading(true);
+    // no-op: removed retryAfter handling
 
     if (formData.password !== formData.confirmPassword) {
       setError('Passwords do not match');
@@ -42,58 +44,57 @@ const SignUp: React.FC = () => {
     }
 
     try {
-      // First, check if a user with this email already exists
-      const { data: existingUser, error: _existingUserError } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('email', formData.email)
-        .maybeSingle();
-
-      if (existingUser) {
-        setError('An account with this email already exists');
-        return;
-      }
-
       // Sign up with Supabase Auth
-      const { data: authData, error: signUpError } = await supabase.auth.signUp({
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: formData.email,
         password: formData.password,
         options: {
-          data: {
-            name: formData.name // Store name in user metadata
-          }
+          data: { name: formData.name }
         }
       });
-
       if (signUpError) throw signUpError;
+      if (!signUpData.user) throw new Error('No user data returned from signup');
+      const authUserId = signUpData.user.id;
 
-      if (authData.user) {
-        try {
-          // Create a profile for the new user
-          const { error: profileError } = await supabase
-            .from('profiles')
-            .insert([{
-              users_id: authData.user.id,
-              name: formData.name,
-              created_at: new Date().toISOString()
-            }]);
+      // Persist to public.users (auth_id + email)
+      const { error: saveUserError } = await supabase
+        .from('users')
+        .upsert(
+          [{ auth_id: authUserId, email: formData.email }],
+          { onConflict: 'auth_id' }
+        )
+        .select()
+        .maybeSingle();
+      if (saveUserError) throw saveUserError;
 
-          if (profileError) {
-            console.error('Profile creation error:', profileError);
-            // Don't throw the error, just log it and continue
-          }
-        } catch (profileErr) {
-          console.error('Profile creation error:', profileErr);
-          // Don't throw the error, just log it and continue
-        }
+      // Ensure a profile exists tied to this auth user id
+      const { data: savedProfile, error: saveProfileError } = await supabase
+        .from('profiles')
+        .upsert(
+          [{ users_id: authUserId, name: formData.name }],
+          { onConflict: 'users_id' }
+        )
+        .select()
+        .single();
+      if (saveProfileError) throw saveProfileError;
+      
+      // Sign in the user immediately
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: formData.email,
+        password: formData.password,
+      });
+      if (signInError) throw signInError;
+      if (!signInData.session) throw new Error('No session returned after sign in');
 
-        // Show confirmation message and redirect
-        setError('Please check your email for confirmation link before signing in');
-        navigate('/');
+      // Store session and redirect
+      localStorage.setItem('token', signInData.session.access_token);
+      // Store profile id for subsequent operations (e.g., creating boards)
+      if (savedProfile?.id) {
+        localStorage.setItem('profileId', savedProfile.id);
       }
-    } catch (err) {
-      console.error('Registration error:', err);
-      setError('Failed to create account');
+      navigate('/boards');
+    } catch (err: any) {
+      setError(err.message || 'Failed to create account');
     } finally {
       setLoading(false);
     }

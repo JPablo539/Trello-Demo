@@ -42,102 +42,22 @@ const LoginForm: React.FC = () => {
       // Store the session
       localStorage.setItem('token', data.session?.access_token || '');
 
-      // Get user's profile
-      let profileData;
-      const { data: initialProfile, error: profileError } = await supabase
+      // Get user's profile by users_id
+      const { data: profile, error: profileError } = await supabase
         .from('profiles')
         .select('*')
         .eq('users_id', data.user?.id)
-        .maybeSingle();
+        .single();
 
-      if (profileError) {
-        console.error('Profile fetch error:', profileError);
-        // If profile doesn't exist, create it
-        if (profileError.code === 'PGRST116') {
-          const { data: newProfile, error: createProfileError } = await supabase
-            .from('profiles')
-            .insert([{
-              users_id: data.user?.id,
-              name: data.user?.user_metadata?.name || 'User',
-              created_at: new Date().toISOString()
-            }])
-            .select()
-            .maybeSingle();
-
-          if (createProfileError) {
-            console.error('Profile creation error:', createProfileError);
-            throw createProfileError;
-          }
-
-          profileData = newProfile;
-        } else {
-          throw profileError;
-        }
-      } else {
-        profileData = initialProfile;
-      }
-
-      // Check if user has any boards through boardProfileRelation
-      const { data: boardRelations, error: boardsError } = await supabase
-        .from('boardProfileRelation')
-        .select('board_id')
-        .eq('profile_id', profileData.id);
-
-      if (boardsError) {
-        console.error('Board relations fetch error:', boardsError);
-        throw boardsError;
-      }
-
-      // If no boards exist, create a default board and relation
-      if (!boardRelations || boardRelations.length === 0) {
-        try {
-          // Create a new board
-          const { data: newBoard, error: createBoardError } = await supabase
-            .from('boards')
-            .insert([{ 
-              board_name: 'My First Board',
-              profiles_id: profileData.id,
-              created_at: new Date().toISOString()
-            }])
-            .select()
-            .maybeSingle();
-
-          if (createBoardError) {
-            console.error('Board creation error:', createBoardError);
-            throw createBoardError;
-          }
-
-          // Create the board-profile relation
-          const { error: relationError } = await supabase
-            .from('boardProfileRelation')
-            .insert([{
-              board_id: newBoard.id,
-              profile_id: profileData.id,
-              created_at: new Date().toISOString()
-            }]);
-
-          if (relationError) {
-            console.error('Board relation creation error:', relationError);
-            throw relationError;
-          }
-        } catch (err) {
-          console.error('Error creating default board:', err);
-          throw err;
-        }
-      }
+      if (profileError) throw profileError;
 
       // Store profile ID in localStorage for later use
-      localStorage.setItem('profileId', profileData.id);
+      localStorage.setItem('profileId', profile.id);
 
       // Redirect to boards view
       navigate('/boards');
     } catch (err: any) {
-      console.error('Login error:', err);
-      if (err.code === '23503') {
-        setError('Please check your email and confirm your account before signing in.');
-      } else {
-        setError('Invalid email or password');
-      }
+      setError(err.message || 'Invalid email or password');
     } finally {
       setLoading(false);
     }

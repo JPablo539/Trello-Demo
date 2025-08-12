@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
 
 interface Board {
   id: string;
@@ -15,18 +17,35 @@ const Boards: React.FC = () => {
   const [error, setError] = useState<string>('');
   const [newBoardName, setNewBoardName] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+  const gridRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    fetchBoards();
-  }, []);
-
-    const fetchBoards = async () => {
-      try {
+  const fetchBoards = useCallback(async () => {
+    try {
       setLoading(true);
-        const profileId = localStorage.getItem('profileId');
-        if (!profileId) {
-        throw new Error('No profile ID found');
+      let profileId = localStorage.getItem('profileId');
+      if (!profileId) {
+        // Try to recover: fetch current user and get profile
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+        if (userError) {
+          throw userError;
         }
+        if (user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('users_id', user.id)
+            .single();
+          if (profile) {
+            profileId = profile.id;
+            localStorage.setItem('profileId', profile.id);
+            console.log('Recovered profileId:', profile.id);
+          } else {
+            throw new Error('No profile found for current user');
+          }
+        } else {
+          throw new Error('No profile ID found');
+        }
+      }
 
       const { data: relations, error: relationsError } = await supabase
         .from('boardProfileRelation')
@@ -35,7 +54,7 @@ const Boards: React.FC = () => {
 
       if (relationsError) throw relationsError;
 
-      if (relations && relations.length > 0) {
+      if (relations?.length) {
         const boardIds = relations.map(relation => relation.board_id);
         const { data: boardsData, error: boardsError } = await supabase
           .from('boards')
@@ -45,14 +64,89 @@ const Boards: React.FC = () => {
 
         if (boardsError) throw boardsError;
         setBoards(boardsData || []);
+      } else {
+        setBoards([]);
       }
-      } catch (err) {
+    } catch (err) {
       console.error('Error fetching boards:', err);
-        setError('Failed to load boards');
-      } finally {
-        setLoading(false);
-      }
-    };
+      setError(err instanceof Error ? err.message : 'Failed to load boards');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchBoards();
+  }, [fetchBoards]);
+
+  // Drag-n-drop setup for reordering boards in the grid
+  useEffect(() => {
+    const cleanups: Array<() => void> = [];
+
+    if (gridRef.current) {
+      cleanups.push(
+        dropTargetForElements({
+          element: gridRef.current,
+          getData: () => ({ type: 'BOARD_DROP_TARGET', index: boards.length }),
+          onDrop: async ({ source }) => {
+            const data = source.data as any;
+            if (data?.type !== 'BOARD') return;
+            const from = data.sourceIndex as number;
+            const to = boards.length; // append at end
+            if (from === to || from < 0) return;
+            const next = Array.from(boards);
+            const [moved] = next.splice(from, 1);
+            next.splice(to, 0, moved);
+            setBoards(next);
+            // Try to persist if a 'position' column exists
+            try {
+              const updates = next.map((b, i) => supabase.from('boards').update({ position: i + 1 }).eq('id', b.id));
+              await Promise.all(updates);
+            } catch (e) {
+              // ignore if schema doesn't have 'position'
+              console.warn('Board order persistence skipped (missing position column)');
+            }
+          },
+        })
+      );
+    }
+
+    boards.forEach((board, index) => {
+      const el = document.getElementById(`board-${board.id}`);
+      if (!el) return;
+      cleanups.push(
+        combine(
+          draggable({
+            element: el,
+            getInitialData: () => ({ type: 'BOARD', boardId: board.id, sourceIndex: index }),
+          }),
+          dropTargetForElements({
+            element: el,
+            getData: () => ({ type: 'BOARD_DROP_TARGET', index }),
+            onDrop: async ({ source }) => {
+              const data = source.data as any;
+              if (data?.type !== 'BOARD') return;
+              const from = data.sourceIndex as number;
+              const to = index;
+              if (from === to) return;
+              const next = Array.from(boards);
+              const [moved] = next.splice(from, 1);
+              next.splice(to, 0, moved);
+              setBoards(next);
+              try {
+                const updates = next.map((b, i) => supabase.from('boards').update({ position: i + 1 }).eq('id', b.id));
+                await Promise.all(updates);
+              } catch (e) {
+                console.warn('Board order persistence skipped (missing position column)');
+              }
+            },
+          })
+        )
+      );
+    });
+
+    return () => cleanups.forEach((fn) => fn());
+  }, [boards]);
 
   const handleCreateBoard = async () => {
     if (!newBoardName.trim()) return;
@@ -216,10 +310,11 @@ const Boards: React.FC = () => {
           </div>
             </div>
             
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {boards.map((board) => (
                   <div
                     key={board.id}
+                    id={`board-${board.id}`}
               className="bg-white/10 rounded-lg p-4 hover:bg-white/20 transition-colors duration-200 cursor-pointer group"
               onClick={() => navigate(`/board/${board.id}`)}
             >

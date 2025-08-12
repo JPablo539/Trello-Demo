@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import List from './List';
-import { DragDropContext, Droppable, Draggable, DropResult } from 'react-beautiful-dnd';
+import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
 
 interface ListItem {
   id: string;
@@ -29,7 +30,8 @@ const Board: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [newListName, setNewListName] = useState('');
-  const [isDragging, setIsDragging] = useState(false);
+  const [, setIsDragging] = useState(false);
+  const boardRowRef = useRef<HTMLDivElement>(null);
 
   const fetchListsAndCards = useCallback(async () => {
     try {
@@ -58,6 +60,8 @@ const Board: React.FC = () => {
         });
         setCards(groupedCards);
       } else {
+        // No lists found for this board; ensure we clear any stale cards
+        setCards({});
       }
     } catch (err) {
       console.error('Error fetching data:', err);
@@ -123,14 +127,25 @@ const Board: React.FC = () => {
   const handleCreateList = async () => {
     if (!newListName.trim()) return;
     try {
+      if (!boardId) {
+        setError('Invalid board.');
+        return;
+      }
+
       const newPosition = lists.length > 0 ? Math.max(...lists.map(l => l.position)) + 1 : 1;
-      const { error } = await supabase
+      const { data: insertedList, error } = await supabase
         .from('lists')
         .insert([{ board_id: boardId, list_name: newListName.trim(), position: newPosition }])
         .select()
-        .maybeSingle();
+        .single();
 
       if (error) throw error;
+
+      if (insertedList) {
+        setLists(prev => [...prev, insertedList].sort((a, b) => a.position - b.position));
+        setCards(prev => ({ ...prev, [insertedList.id]: prev[insertedList.id] ?? [] }));
+      }
+
       setNewListName('');
     } catch (err) {
       console.error('Error creating list:', err);
@@ -140,11 +155,31 @@ const Board: React.FC = () => {
 
   const handleDeleteList = async (listId: string) => {
     try {
-      const { error } = await supabase.from('lists').delete().eq('id', listId);
-      if (error) throw error;
+      // Delete cards in the list first to avoid FK constraint issues
+      const { error: cardsError } = await supabase
+        .from('cards')
+        .delete()
+        .eq('list_id', listId);
+      if (cardsError) throw cardsError;
+
+      // Then delete the list itself
+      const { error: listError } = await supabase
+        .from('lists')
+        .delete()
+        .eq('id', listId);
+      if (listError) throw listError;
+
+      // Update local state immediately
+      setLists(prev => prev.filter(l => l.id !== listId));
+      setCards(prev => {
+        const { [listId]: _removed, ...rest } = prev;
+        return rest;
+      });
     } catch (err) {
       console.error('Error deleting list:', err);
       setError('Failed to delete list');
+      // Attempt to resync data
+      fetchListsAndCards();
     }
   };
 
@@ -161,21 +196,44 @@ const Board: React.FC = () => {
   const handleAddCard = async (listId: string, content: string) => {
     try {
       const newPosition = cards[listId]?.length > 0 ? Math.max(...cards[listId].map(c => c.position)) + 1 : 1;
-      const { error } = await supabase.from('cards').insert([{ list_id: listId, content, position: newPosition }]);
+      const { data: insertedCard, error } = await supabase
+        .from('cards')
+        .insert([{ list_id: listId, content, position: newPosition }])
+        .select()
+        .single();
+
       if (error) throw error;
+
+      if (insertedCard) {
+        setCards(prev => {
+          const nextListCards = [...(prev[listId] ?? [])];
+          nextListCards.push(insertedCard);
+          nextListCards.sort((a, b) => a.position - b.position);
+          return { ...prev, [listId]: nextListCards };
+        });
+      }
     } catch (err) {
       console.error('Error creating card:', err);
       setError('Failed to create card');
     }
   };
 
-  const handleDeleteCard = async (cardId: string) => {
+  const handleDeleteCard = async (cardId: string, listId: string) => {
     try {
+      // Optimistically update local state for snappier UI
+      setCards((prev) => {
+        const next = { ...prev };
+        next[listId] = (next[listId] || []).filter((c) => c.id !== cardId);
+        return next;
+      });
+
       const { error } = await supabase.from('cards').delete().eq('id', cardId);
       if (error) throw error;
     } catch (err) {
       console.error('Error deleting card:', err);
       setError('Failed to delete card');
+      // Attempt to resync state from server
+      fetchListsAndCards();
     }
   };
 
@@ -189,69 +247,140 @@ const Board: React.FC = () => {
     }
   };
 
-  const onDragStart = () => {
-    setIsDragging(true);
-  };
-
-  const onDragEnd = async (result: DropResult) => {
-    setIsDragging(false);
-    const { destination, source, type } = result;
-    
-    if (!destination) return;
-    if (destination.droppableId === source.droppableId && destination.index === source.index) return;
-
+  // Move a card across lists or within the same list
+  const onCardMove = async (
+    sourceListId: string,
+    sourceIndex: number,
+    cardId: string,
+    destinationListId: string,
+    destinationIndex: number
+  ) => {
     try {
-      if (type === 'LIST') {
-        const newLists = Array.from(lists);
-        const [movedList] = newLists.splice(source.index, 1);
-        newLists.splice(destination.index, 0, movedList);
-        
-        // Update positions in the database
-        const updates = newLists.map((list, index) => 
-          supabase.from('lists').update({ position: index + 1 }).eq('id', list.id)
+      setIsDragging(true);
+
+      // Compute next state from current cards
+      const sourceCards = [...(cards[sourceListId] || [])];
+      const destCards = sourceListId === destinationListId ? sourceCards : [...(cards[destinationListId] || [])];
+
+      const [moved] = sourceCards.splice(sourceIndex, 1);
+      if (!moved || moved.id !== cardId) {
+        return;
+      }
+
+      destCards.splice(destinationIndex, 0, { ...moved, list_id: destinationListId });
+
+      const nextCards: typeof cards = { ...cards };
+      if (sourceListId === destinationListId) {
+        nextCards[sourceListId] = destCards;
+      } else {
+        nextCards[sourceListId] = sourceCards;
+        nextCards[destinationListId] = destCards;
+      }
+
+      setCards(nextCards);
+
+      // Persist positions using computed nextCards
+      if (sourceListId === destinationListId) {
+        const updates = (nextCards[destinationListId] || []).map((card, index) =>
+          supabase.from('cards').update({ position: index + 1 }).eq('id', card.id)
         );
-        
         await Promise.all(updates);
-        setLists(newLists);
-      } else if (type === 'CARD') {
-        const sourceList = cards[source.droppableId] || [];
-        const destList = cards[destination.droppableId] || [];
-        const [movedCard] = sourceList.splice(source.index, 1);
-        
-        if (source.droppableId === destination.droppableId) {
-          destList.splice(destination.index, 0, movedCard);
-          const updates = destList.map((card, index) =>
-            supabase.from('cards').update({ position: index + 1 }).eq('id', card.id)
-          );
-          await Promise.all(updates);
-          setCards({ ...cards, [source.droppableId]: destList });
-        } else {
-          movedCard.list_id = destination.droppableId;
-          destList.splice(destination.index, 0, movedCard);
-          
-          const sourceUpdates = sourceList.map((card, index) =>
-            supabase.from('cards').update({ position: index + 1 }).eq('id', card.id)
-          );
-          
-          const destUpdates = destList.map((card, index) =>
-            supabase.from('cards').update({ position: index + 1, list_id: destination.droppableId }).eq('id', card.id)
-          );
-          
-          await Promise.all([...sourceUpdates, ...destUpdates]);
-          setCards({
-            ...cards,
-            [source.droppableId]: sourceList,
-            [destination.droppableId]: destList
-          });
-        }
+      } else {
+        const sourceUpdates = (nextCards[sourceListId] || []).map((card, index) =>
+          supabase.from('cards').update({ position: index + 1 }).eq('id', card.id)
+        );
+        const destUpdates = (nextCards[destinationListId] || []).map((card, index) =>
+          supabase.from('cards').update({ position: index + 1, list_id: destinationListId }).eq('id', card.id)
+        );
+        await Promise.all([...sourceUpdates, ...destUpdates]);
       }
     } catch (err) {
-      console.error('Error updating positions:', err);
+      console.error('Error updating card positions:', err);
       setError('Failed to update positions');
-      // Refresh the data to ensure consistency
       fetchListsAndCards();
+    } finally {
+      setIsDragging(false);
     }
   };
+
+  // Register list draggables and drop targets for reordering lists
+  useEffect(() => {
+    const cleanups: Array<() => void> = [];
+
+    // Drop target on the board row to allow dropping at end
+    if (boardRowRef.current) {
+      cleanups.push(
+        dropTargetForElements({
+          element: boardRowRef.current,
+          getData: () => ({ type: 'LIST_DROP_TARGET', index: lists.length }),
+          onDrop: async ({ source }) => {
+            const data = source.data as any;
+            if (data?.type !== 'LIST') return;
+            const from = data.sourceIndex as number;
+            const to = lists.length; // append at end
+            if (from === to || from < 0) return;
+            const newLists = Array.from(lists);
+            const [moved] = newLists.splice(from, 1);
+            newLists.splice(to, 0, moved);
+            try {
+              const updates = newLists.map((list, index) =>
+                supabase.from('lists').update({ position: index + 1 }).eq('id', list.id)
+              );
+              await Promise.all(updates);
+              setLists(newLists);
+            } catch (err) {
+              console.error('Error updating list order:', err);
+              setError('Failed to update positions');
+              fetchListsAndCards();
+            }
+          },
+        })
+      );
+    }
+
+    // Each list element is both draggable and a drop target (to drop before it)
+    lists.forEach((list, index) => {
+      const el = document.getElementById(`list-${list.id}`);
+      if (!el) return;
+      cleanups.push(
+        combine(
+          draggable({
+            element: el,
+            getInitialData: () => ({ type: 'LIST', listId: list.id, sourceIndex: index }),
+          }),
+          dropTargetForElements({
+            element: el,
+            getData: () => ({ type: 'LIST_DROP_TARGET', index }),
+            onDrop: async ({ source }) => {
+              const data = source.data as any;
+              if (data?.type !== 'LIST') return;
+              const from = data.sourceIndex as number;
+              const to = index;
+              if (from === to) return;
+              const newLists = Array.from(lists);
+              const [moved] = newLists.splice(from, 1);
+              newLists.splice(to, 0, moved);
+              try {
+                const updates = newLists.map((l, i) =>
+                  supabase.from('lists').update({ position: i + 1 }).eq('id', l.id)
+                );
+                await Promise.all(updates);
+                setLists(newLists);
+              } catch (err) {
+                console.error('Error updating list order:', err);
+                setError('Failed to update positions');
+                fetchListsAndCards();
+              }
+            },
+          })
+        )
+      );
+    });
+
+    return () => {
+      cleanups.forEach((fn) => fn());
+    };
+  }, [lists]);
 
   if (loading) {
     return (
@@ -312,47 +441,27 @@ const Board: React.FC = () => {
           </div>
         </div>
 
-        <DragDropContext onDragStart={onDragStart} onDragEnd={onDragEnd}>
-          <Droppable droppableId="board" type="LIST" direction="horizontal">
-            {(provided) => (
-              <div
-                className="flex-1 overflow-x-auto overflow-y-hidden scrollbar-bottom min-h-0 flex p-4 gap-4"
-                ref={provided.innerRef}
-                {...provided.droppableProps}
-              >
-                {lists.map((list, index) => (
-                  <Draggable 
-                    key={list.id} 
-                    draggableId={list.id} 
-                    index={index}
-                    isDragDisabled={isDragging}
-                  >
-                    {(provided) => (
-                      <div 
-                        ref={provided.innerRef} 
-                        {...provided.draggableProps} 
-                        {...provided.dragHandleProps}
-                      >
-                        <List
-                          id={list.id}
-                          title={list.list_name}
-                          cards={cards[list.id] || []}
-                          index={index}
-                          onDeleteList={handleDeleteList}
-                          onUpdateList={handleUpdateList}
-                          onDeleteCard={handleDeleteCard}
-                          onUpdateCard={handleUpdateCard}
-                          onAddCard={handleAddCard}
-                        />
-                      </div>
-                    )}
-                  </Draggable>
-                ))}
-                {provided.placeholder}
-              </div>
-            )}
-          </Droppable>
-        </DragDropContext>
+        <div
+          ref={boardRowRef}
+          className="flex-1 overflow-x-auto overflow-y-hidden scrollbar-bottom min-h-0 flex p-4 gap-4"
+        >
+          {lists.map((list, index) => (
+            <div key={list.id} id={`list-${list.id}`} className="flex">
+              <List
+                id={list.id}
+                title={list.list_name}
+                cards={cards[list.id] || []}
+                index={index}
+                onDeleteList={handleDeleteList}
+                onUpdateList={handleUpdateList}
+                onDeleteCard={handleDeleteCard}
+                onUpdateCard={handleUpdateCard}
+                onAddCard={handleAddCard}
+                onCardMove={onCardMove}
+              />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
